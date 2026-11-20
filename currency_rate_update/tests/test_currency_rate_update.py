@@ -2,7 +2,8 @@
 # Copyright 2019 Brainbean Apps (https://brainbeanapps.com)
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
-from datetime import date
+from datetime import date, timedelta
+from io import BytesIO
 from unittest import mock
 
 from dateutil.relativedelta import relativedelta
@@ -16,6 +17,35 @@ from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 _module_ns = "odoo.addons.currency_rate_update"
 _file_ns = _module_ns + ".models.res_currency_rate_provider_ECB"
 _ECB_provider_class = _file_ns + ".ResCurrencyRateProviderECB"
+_ECB_urlopen = _file_ns + ".urlopen"
+
+_FAKE_ECB_RATES = {"USD": 1.10, "CHF": 0.95, "JPY": 160.0, "GBP": 0.85}
+
+
+def _fake_ecb_urlopen(url, timeout=None):
+    """Offline replacement for ``urlopen`` returning an ECB-like XML feed.
+
+    Like the real ECB feeds, it publishes one set of rates per working day
+    (Monday to Friday) up to today.
+    """
+    cubes = []
+    day = date(2018, 1, 1)
+    today = date.today()
+    while day <= today:
+        if day.weekday() < 5:
+            rates = "".join(
+                f'<Cube currency="{currency}" rate="{rate + day.day / 1000}"/>'
+                for currency, rate in _FAKE_ECB_RATES.items()
+            )
+            cubes.append(f'<Cube time="{day.isoformat()}">{rates}</Cube>')
+        day += timedelta(days=1)
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" '
+        'xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">'
+        "<Cube>" + "".join(reversed(cubes)) + "</Cube></gesmes:Envelope>"
+    )
+    return BytesIO(xml.encode())
 
 
 @tagged("post_install", "-at_install")
@@ -23,6 +53,11 @@ class TestCurrencyRateUpdate(AccountTestInvoicingCommon):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+
+        # Never hit the real ECB servers from the tests
+        patcher = mock.patch(_ECB_urlopen, side_effect=_fake_ecb_urlopen)
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
 
         cls.Company = cls.env["res.company"]
         cls.CurrencyRate = cls.env["res.currency.rate"]
